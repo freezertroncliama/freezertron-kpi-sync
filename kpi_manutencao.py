@@ -628,6 +628,15 @@ def main():
         shutil.rmtree(PASTA_TEMP)
     os.makedirs(PASTA_TEMP, exist_ok=True)
 
+    # Roda em lotes (ex: GitHub Actions com timeout curto): processa no
+    # máximo N arquivos novos/alterados por execução e para — quem já está
+    # em dia com o cache não conta pro limite (é só releitura, instantâneo).
+    # Só publica no Supabase quando a lista INTEIRA foi percorrida nesta
+    # execução; senão a gente arriscaria apagar o banco com dado pela
+    # metade no meio da varredura. Com o cache persistido entre execuções
+    # (ex: actions/cache), a próxima retoma de onde parou.
+    max_novos = int(os.environ.get("KPI_MAX_NOVOS_POR_EXECUCAO", "0") or "0")
+
     client = conectar_nextcloud()
     cache_anterior = carregar_cache(CACHE_PATH)
 
@@ -637,8 +646,13 @@ def main():
 
     atendimentos: list[Atendimento] = []
     pares: list[tuple[str, Atendimento]] = []
-    cache_novo: dict = {}
+    # Começa com o cache antigo inteiro — se a execução parar no meio do
+    # lote, o que não foi visitado ainda continua salvo (não é substituído
+    # por um cache_novo vazio/parcial).
+    cache_novo: dict = dict(cache_anterior)
     reaproveitados = 0
+    novos_processados = 0
+    execucao_completa = True
     for i, item in enumerate(pdfs, 1):
         caminho, etag = item["path"], item["etag"]
         nome = caminho.rstrip("/").split("/")[-1]
@@ -652,9 +666,17 @@ def main():
             a = dict_para_atendimento(entrada_cache["dados"])
             atendimentos.append(a)
             pares.append((caminho, a))
-            cache_novo[caminho] = entrada_cache
             reaproveitados += 1
             continue
+
+        if max_novos and novos_processados >= max_novos:
+            execucao_completa = False
+            print(
+                f"\nLimite de {max_novos} novo(s)/alterado(s) atingido "
+                f"({i - 1}/{len(pdfs)} arquivos vistos) — parando por aqui, "
+                "a próxima execução continua de onde parou."
+            )
+            break
 
         print(f"  [{i}/{len(pdfs)}] {nome} (novo/alterado/regra atualizada)")
         try:
@@ -666,16 +688,22 @@ def main():
                 "versao": CACHE_VERSAO,
                 "dados": atendimento_para_dict(a),
             }
+            novos_processados += 1
         except Exception as e:
             print(f"    [erro] não processado: {e}")
 
     salvar_cache(cache_novo, CACHE_PATH)
     shutil.rmtree(PASTA_TEMP, ignore_errors=True)
 
-    print(
-        f"\n{len(pdfs) - reaproveitados} processado(s) agora, "
-        f"{reaproveitados} reaproveitado(s) do cache."
-    )
+    print(f"\n{novos_processados} processado(s) agora, {reaproveitados} reaproveitado(s) do cache.")
+
+    if not execucao_completa:
+        print(
+            "Execução parcial — não publica no Supabase ainda (lista não foi "
+            "percorrida por inteiro). Rode de novo pra continuar o lote."
+        )
+        return
+
     print(f"Gerando relatório: {SAIDA_DOCX}")
     gerar_relatorio(atendimentos, SAIDA_DOCX)
 
