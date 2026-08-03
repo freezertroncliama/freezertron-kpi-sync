@@ -1,0 +1,44 @@
+name: Sincronizar KPI de Manutenção
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: kpi-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      # Sem isso, cada execução reprocessaria os ~400 PDFs do zero (o
+      # runner é descartado a cada vez). Guarda o cache de etags entre
+      # execuções pra só reprocessar arquivo novo/alterado.
+      - name: Restaurar cache de PDFs já processados
+        uses: actions/cache@v4
+        with:
+          path: cache_pdfs.json
+          key: kpi-cache-${{ github.run_id }}
+          restore-keys: |
+            kpi-cache-
+
+      - name: Rodar sincronização
+        env:
+          NEXTCLOUD_URL: ${{ secrets.NEXTCLOUD_URL }}
+          NEXTCLOUD_USER: ${{ secrets.NEXTCLOUD_USER }}
+          NEXTCLOUD_APP_PASSWORD: ${{ secrets.NEXTCLOUD_APP_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python kpi_manutencao.py

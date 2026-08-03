@@ -1,0 +1,5 @@
+pdfplumber
+requests
+python-docx
+python-dotenv
+webdavclient3
