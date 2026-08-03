@@ -41,12 +41,6 @@ jobs:
           NEXTCLOUD_APP_PASSWORD: ${{ secrets.NEXTCLOUD_APP_PASSWORD }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Processa em lotes de 150 arquivo novo/alterado por execução —
-          # só publica no Supabase quando a lista inteira já foi vista
-          # (pode levar 2-3 execuções na primeira vez; depois disso, os
-          # lotes de 5 em 5 min normalmente têm poucas novidades e sempre
-          # completam de primeira).
-          KPI_MAX_NOVOS_POR_EXECUCAO: "150"
           # Sem isso, o Python usa buffer de bloco (não de linha) fora de um
           # terminal — os prints ficam presos e só aparecem de uma vez no
           # final, dando a impressão de que travou.
