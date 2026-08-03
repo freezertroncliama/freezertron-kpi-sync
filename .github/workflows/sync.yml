@@ -47,4 +47,8 @@ jobs:
           # lotes de 5 em 5 min normalmente têm poucas novidades e sempre
           # completam de primeira).
           KPI_MAX_NOVOS_POR_EXECUCAO: "150"
-        run: python kpi_manutencao.py
+          # Sem isso, o Python usa buffer de bloco (não de linha) fora de um
+          # terminal — os prints ficam presos e só aparecem de uma vez no
+          # final, dando a impressão de que travou.
+          PYTHONUNBUFFERED: "1"
+        run: python -u kpi_manutencao.py
