@@ -80,12 +80,6 @@ CACHE_PATH = "cache_pdfs.json"
 # Bump sempre que classificar_tipo/extrair_data/extrair_duracao_corretiva
 # mudar de comportamento — invalida entradas de cache presas na regra antiga.
 CACHE_VERSAO = 6
-# Intervalo (em dias) considerado "em dia" pra cada periodicidade de PMOC,
-# com uma folga pequena pra não marcar como atrasado por 1-2 dias de
-# variação de agenda. Só usado pra categorias com PMOC próprio (hoje: AR
-# CONDICIONADOS e BEBEDOUROS) — chillers ainda não têm template de PMOC,
-# então continuam na regra simplificada de "mês atual".
-INTERVALO_DIAS_POR_PERIODICIDADE = {"semanal": 10, "mensal": 35, "trimestral": 100}
 # Periodicidade da troca de filtro de bebedouro (fixa, sem template de PMOC
 # próprio) — usada só pra corrigir o bug abaixo, o cálculo real de
 # conforme/vencendo/atrasado é feito no painel (Next.js).
@@ -524,8 +518,8 @@ def montar_resumo_equipamentos(
             # internamente pra saber qual "próxima substituição" é a mais
             # atual (a de um checklist antigo pode já estar desatualizada).
             "_data_checklist_filtro": None,
-            # fallback pras categorias/equipamentos sem periodicidade
-            # conhecida (hoje: chillers) — "teve preventiva neste mês?"
+            # "teve preventiva neste mês calendário?" — critério de em_dia
+            # pra todas as categorias (ver decisão de 03/08/2026 acima).
             "_realizado_mes_atual": False,
         }
 
@@ -552,24 +546,14 @@ def montar_resumo_equipamentos(
                 info["ultima_substituicao_filtro"] = a.ultima_substituicao_filtro
                 info["proxima_substituicao_filtro"] = a.proxima_substituicao_filtro
 
-    # segunda passada: decide "em dia"/"dias de atraso" — pela periodicidade
-    # real quando ela é conhecida (AR CONDICIONADOS/BEBEDOUROS), senão cai
-    # de volta pra regra simplificada de "teve preventiva este mês"
-    # (hoje é sempre o caso dos chillers, que não têm template de PMOC).
+    # Decidido com o Rafael em 03/08/2026: voltar pra regra simples de mês
+    # calendário pra TODAS as categorias (não só chillers) — "em dia" só se
+    # teve preventiva dentro do mês vigente, sem carência pela periodicidade
+    # própria (mensal/trimestral/semanal). Reseta pra 0 feito no dia 1 de
+    # cada mês, mesmo que o prazo real do PMOC ainda não tenha vencido.
     for info in por_equip.values():
-        periodicidade = info["periodicidade"]
-        if periodicidade and periodicidade in INTERVALO_DIAS_POR_PERIODICIDADE:
-            intervalo = INTERVALO_DIAS_POR_PERIODICIDADE[periodicidade]
-            if info["ultima_preventiva"] is None:
-                info["em_dia"] = False
-                info["dias_atraso"] = None
-            else:
-                dias_desde = (agora - info["ultima_preventiva"]).days
-                info["em_dia"] = dias_desde <= intervalo
-                info["dias_atraso"] = max(0, dias_desde - intervalo)
-        else:
-            info["em_dia"] = info["_realizado_mes_atual"]
-            info["dias_atraso"] = None
+        info["em_dia"] = info["_realizado_mes_atual"]
+        info["dias_atraso"] = None
         del info["_realizado_mes_atual"]
 
     return list(por_equip.values())
