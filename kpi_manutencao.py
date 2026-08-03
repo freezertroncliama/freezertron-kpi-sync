@@ -144,7 +144,10 @@ def extrair_pdfs(itens: list[dict], pasta_raiz: str) -> list[dict]:
     return [
         {"path": item["path"], "etag": item["etag"]}
         for item in itens
-        if not item["isdir"] and item["path"].lower().endswith(".pdf")
+        # .strip() por causa de arquivo real com espaço sobrando no nome
+        # (ex: "Checklist filtro 03.08.26.pdf ") — sem isso, o endswith
+        # exato nunca bate e o arquivo some da lista sem nenhum aviso.
+        if not item["isdir"] and item["path"].strip().lower().endswith(".pdf")
     ]
 
 
