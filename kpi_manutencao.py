@@ -114,38 +114,15 @@ def conectar_nextcloud() -> Client:
     return Client(options)
 
 
-def listar_pdfs_recursivo(client: Client, pasta: str) -> list[dict]:
-    """Varre `pasta` recursivamente e retorna, para todo .pdf encontrado,
-    {'path': <caminho relativo à raiz do WebDAV>, 'etag': <etag atual>} —
-    não importa a profundidade da árvore. O etag permite detectar depois,
-    sem baixar o arquivo, se ele mudou desde a última execução."""
-    prefixo_servidor = f"/remote.php/dav/files/{NEXTCLOUD_USER}/"
-    resultados: list[dict] = []
-    itens = client.list(pasta, get_info=True)
-    for item in itens:
-        caminho_servidor = item["path"]
-        if caminho_servidor.startswith(prefixo_servidor):
-            caminho = caminho_servidor[len(prefixo_servidor):]
-        else:
-            caminho = caminho_servidor.lstrip("/")
-        if caminho.rstrip("/") == pasta.strip("/"):
-            continue
-        nome = caminho.rstrip("/").split("/")[-1]
-        eh_pasta = bool(item.get("isdir"))
-        if eh_pasta:
-            resultados.extend(listar_pdfs_recursivo(client, caminho))
-        elif nome.lower().endswith(".pdf"):
-            resultados.append({"path": caminho, "etag": item.get("etag")})
-    return resultados
-
-
-def listar_equipamentos(client: Client, pasta_raiz: str) -> dict[str, list[str]]:
-    """Lê só a estrutura de pastas (Categoria/Equipamento), sem entrar nos
-    arquivos — dá o total de equipamentos "no contrato" por categoria,
-    incluindo os que não tiveram nenhum atendimento ainda este ano."""
+def listar_arvore(client: Client, pasta_raiz: str) -> list[dict]:
+    """Uma chamada só (Depth: infinity) pra árvore inteira, em vez de uma
+    chamada por pasta — o jeito anterior (uma requisição por pasta de
+    equipamento, ~100+ pastas) é o motivo da varredura levar ~10min só pra
+    listar; isso aqui deve levar segundos. Retorna cada item com o
+    `path` já relativo à raiz do WebDAV (sem o prefixo /remote.php/...)."""
     prefixo_servidor = f"/remote.php/dav/files/{NEXTCLOUD_USER}/"
 
-    def nome_relativo(item: dict) -> str:
+    def caminho_relativo(item: dict) -> str:
         caminho_servidor = item["path"]
         if caminho_servidor.startswith(prefixo_servidor):
             caminho = caminho_servidor[len(prefixo_servidor):]
@@ -153,20 +130,50 @@ def listar_equipamentos(client: Client, pasta_raiz: str) -> dict[str, list[str]]
             caminho = caminho_servidor.lstrip("/")
         return caminho.rstrip("/")
 
-    resultado: dict[str, list[str]] = {}
-    categorias = [
-        item for item in client.list(pasta_raiz, get_info=True)
-        if bool(item.get("isdir")) and nome_relativo(item) != pasta_raiz.strip("/")
+    itens_brutos = client.list(pasta_raiz, get_info=True, recursive=True)
+    raiz_norm = pasta_raiz.strip("/")
+    resultado = []
+    for item in itens_brutos:
+        caminho = caminho_relativo(item)
+        if caminho == raiz_norm:
+            continue
+        resultado.append({
+            "path": caminho,
+            "etag": item.get("etag"),
+            "isdir": bool(item.get("isdir")),
+        })
+    return resultado
+
+
+def extrair_pdfs(itens: list[dict], pasta_raiz: str) -> list[dict]:
+    """Filtra a árvore completa (listar_arvore) só pros PDFs."""
+    return [
+        {"path": item["path"], "etag": item["etag"]}
+        for item in itens
+        if not item["isdir"] and item["path"].lower().endswith(".pdf")
     ]
-    for cat_item in categorias:
-        categoria_caminho = nome_relativo(cat_item)
-        categoria_nome = categoria_caminho.split("/")[-1]
-        equipamentos = [
-            nome_relativo(item).split("/")[-1]
-            for item in client.list(categoria_caminho, get_info=True)
-            if bool(item.get("isdir")) and nome_relativo(item) != categoria_caminho
-        ]
-        resultado[categoria_nome] = equipamentos
+
+
+def extrair_estrutura(itens: list[dict], pasta_raiz: str) -> dict[str, list[str]]:
+    """Filtra a árvore completa (listar_arvore) pra estrutura Categoria/
+    Equipamento — dá o total de equipamentos "no contrato" por categoria,
+    incluindo os que não tiveram nenhum atendimento ainda este ano."""
+    raiz_norm = pasta_raiz.strip("/")
+    resultado: dict[str, list[str]] = {}
+    for item in itens:
+        if not item["isdir"]:
+            continue
+        caminho = item["path"]
+        if not caminho.startswith(raiz_norm + "/"):
+            continue
+        rel = caminho[len(raiz_norm) + 1:]
+        partes = rel.split("/")
+        # só pastas de 2 níveis (Categoria/Equipamento), relativo à raiz —
+        # qualquer outra profundidade não interessa aqui.
+        if len(partes) != 2:
+            continue
+        categoria, equipamento = partes
+        resultado.setdefault(categoria, []).append(equipamento)
     return resultado
 
 
@@ -640,8 +647,10 @@ def main():
     client = conectar_nextcloud()
     cache_anterior = carregar_cache(CACHE_PATH)
 
-    print(f"Listando PDFs em '{PASTA_RAIZ}'...")
-    pdfs = listar_pdfs_recursivo(client, PASTA_RAIZ)
+    print(f"Listando '{PASTA_RAIZ}' (uma chamada recursiva só)...")
+    arvore = listar_arvore(client, PASTA_RAIZ)
+    pdfs = extrair_pdfs(arvore, PASTA_RAIZ)
+    estrutura = extrair_estrutura(arvore, PASTA_RAIZ)
     print(f"{len(pdfs)} PDF(s) encontrado(s).")
 
     atendimentos: list[Atendimento] = []
@@ -710,8 +719,6 @@ def main():
     print("Publicando no Supabase...")
     enviar_para_supabase(pares)
 
-    print("Listando estrutura de equipamentos (total no contrato)...")
-    estrutura = listar_equipamentos(client, PASTA_RAIZ)
     resumo_equipamentos = montar_resumo_equipamentos(estrutura, pares, data_referencia)
     enviar_equipamentos_para_supabase(resumo_equipamentos)
 
