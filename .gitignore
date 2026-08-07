@@ -1,6 +1,6 @@
 .env
 temp_pdfs/
-cache_pdfs.json
+cache_pdfs*.json
 __pycache__/
 *.pyc
 *.docx

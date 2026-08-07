@@ -1,13 +1,25 @@
 """
-KPI de Manutenção — Cliente Contrato PMOC (Refrigeração Aços)
+KPI de Manutenção — múltiplos clientes (Mangels S/A + Noel Supermercados)
 -----------------------------------------------------
-Varre recursivamente os relatórios em PDF (gerados pelo app Produttivo)
-dentro de "REFRIGERAÇÃO AÇOS - RELATÓRIOS/ANO 2026" no Nextcloud, classifica
-cada um como preventiva ou corretiva, extrai data e duração, e gera um
-relatório .docx com KPIs por categoria e por equipamento.
+Varre recursivamente os relatórios em PDF (gerados pelo app Produttivo) no
+Nextcloud, classifica cada um como preventiva ou corretiva, extrai data e
+duração, e gera um relatório .docx com KPIs por categoria e por
+equipamento — um cliente por vez, configurado em CLIENTES.
 
 Premissas validadas com dados reais (ver histórico do projeto):
-- Estrutura: ANO 2026/<Categoria>/<Equipamento>/<arquivo>.pdf
+- Estrutura Mangels: ANO 2026/<Categoria>/<Equipamento>/<arquivo>.pdf
+  (profundidade fixa, 2 níveis sob a pasta raiz).
+- Estrutura Noel: profundidade INCONSISTENTE — equipamento pode estar
+  direto sob a loja (LOJA 01/N 021 - Rack de Resfriado/) ou aninhado sob
+  uma pasta extra (LOJA 01/NOEL LOJA 01/NLJ1_001_BALCÃO_.../). Por isso,
+  pro Noel: `equipamento` é sempre a pasta imediatamente pai do PDF (não
+  depende de profundidade fixa); `loja` vem do prefixo NLJ1-4 no caminho
+  (confirmado com o Rafael em 06/08/2026: NLJ1=Loja1 ... NLJ4=Loja4), com
+  fallback pra "LOJA N" se não achar o prefixo; `categoria` vem de
+  casamento de palavra-chave no nome da pasta de equipamento (lista
+  também passada pelo Rafael) — não do texto do PDF, porque o "Local do
+  ativo" registrado no Produttivo (ex: "SALA DE MÁQUINAS") não bate com o
+  tipo de equipamento que o time quer ver no painel (Balcão/Câmara/Ilha/...).
 - Tipo: definido pelas primeiras linhas do texto do PDF, não pelo nome do
   arquivo (o nome do arquivo pode estar errado — já vimos casos reais).
   Regra (confirmada com o Rafael em 30/07/2026):
@@ -18,10 +30,14 @@ Premissas validadas com dados reais (ver histórico do projeto):
       troca de filtro de bebedouro, não é atendimento de equipamento — ver
       extrair_datas_filtro)
     * título começa com "Ordem de Serviço":
-        - categoria CHILLER'S -> preventiva (chillers ainda não têm
-          template PMOC próprio; até criarem um, o time usa "Ordem de
+        - categoria CHILLER'S (Mangels) -> preventiva (chillers ainda não
+          têm template PMOC próprio; até criarem um, o time usa "Ordem de
           Serviço" pras visitas de rotina)
         - qualquer outra categoria -> corretiva (chamado avulso)
+  Confirmado em 06/08/2026 com um PDF real do Noel: mesmo formato
+  Produttivo da Mangels (mesmo cabeçalho "Em: dd/mm/aaaa hh:mm", mesmas
+  seções Diagnóstico/Solução/Fim do Trabalho) — a classificação por texto
+  vale sem alteração pros dois clientes.
   Cuidado: essa regra pode classificar como preventiva alguma corretiva
   de chiller registrada ANTES do formulário "Manutenção Corretiva"
   existir (pré-julho/2026) — não dá pra distinguir com o dado disponível.
@@ -31,17 +47,26 @@ Premissas validadas com dados reais (ver histórico do projeto):
   Trabalho" / "Fim do Trabalho". PMOC não tem duração real de serviço
   no PDF (só tempo de preenchimento do checklist no app, que não
   representa trabalho em campo).
+- Vazamento/gás: pra alimentar a seção "Recorrência de vazamento" do
+  painel do Noel, marca `vazamento=True` quando a palavra aparece no
+  texto do PDF, e tenta extrair uma quantidade em kg (`extrair_gas_kg`).
+  Confirmado com o Rafael em 06/08/2026: os relatórios de vazamento
+  ainda não têm campo estruturado de quantidade — a extração retorna
+  None até o time começar a preencher isso nos relatórios; não é erro.
 
 Depois de gerar o .docx, publica os atendimentos na tabela
 kpi_manutencao_atendimentos do Supabase (mesmo projeto do gerador de
-orçamento) via service role key — é assim que a aba nova do Next.js
-(/kpi-manutencao) exibe os dados, sem o Next.js falar com o Nextcloud
-diretamente e sem tocar em nada de Omie/cadastro de clientes.
+orçamento) via service role key — é assim que a aba /kpi-manutencao do
+Next.js exibe os dados, sem o Next.js falar com o Nextcloud diretamente e
+sem tocar em nada de Omie/cadastro de clientes. Cada cliente publica só
+as próprias linhas (DELETE escopado por `cliente`) — processar um cliente
+nunca apaga o outro.
 
 USO
 1. Preencher .env com NEXTCLOUD_URL, NEXTCLOUD_USER, NEXTCLOUD_APP_PASSWORD,
    SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
-2. python kpi_manutencao.py
+2. python kpi_manutencao.py                  # roda todos os clientes
+   python kpi_manutencao.py --cliente Noel    # roda só um, pra testar isolado
 """
 
 import json
@@ -49,6 +74,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
@@ -73,30 +99,70 @@ NEXTCLOUD_APP_PASSWORD = os.environ["NEXTCLOUD_APP_PASSWORD"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-PASTA_RAIZ = "REFRIGERAÇÃO AÇOS - RELATÓRIOS/ANO 2026"
 PASTA_TEMP = "temp_pdfs"
-SAIDA_DOCX = f"kpi_manutencao_acos_{datetime.now():%Y%m%d}.docx"
-CACHE_PATH = "cache_pdfs.json"
 # Bump sempre que classificar_tipo/extrair_data/extrair_duracao_corretiva
-# mudar de comportamento — invalida entradas de cache presas na regra antiga.
-CACHE_VERSAO = 6
+# ou a forma do Atendimento mudar de comportamento — invalida entradas de
+# cache presas na regra antiga.
+CACHE_VERSAO = 8
 # Periodicidade da troca de filtro de bebedouro (fixa, sem template de PMOC
 # próprio) — usada só pra corrigir o bug abaixo, o cálculo real de
 # conforme/vencendo/atrasado é feito no painel (Next.js).
 PERIODICIDADE_FILTRO_DIAS = 90
 
+# Um cliente por entrada: nome (vai pra coluna `cliente` no Supabase),
+# pasta raiz no Nextcloud, e o cache de etags (separado por cliente pra
+# não misturar o "já processei isso" de um com o do outro).
+CLIENTES = [
+    {
+        "nome": "Mangels",
+        "pasta_raiz": "REFRIGERAÇÃO AÇOS - RELATÓRIOS/ANO 2026",
+        "cache_path": "cache_pdfs_mangels.json",
+    },
+    {
+        "nome": "Noel",
+        "pasta_raiz": "REFRIGERAÇÃO NOEL SUPERMERCADOS",
+        "cache_path": "cache_pdfs_noel.json",
+    },
+]
+
+# Palavra-chave (sem acento, maiúscula) -> categoria exibida no painel.
+# Lista passada pelo Rafael em 06/08/2026, pro painel do Noel. Ordem
+# importa pouco aqui (nenhuma chave é substring de outra de forma
+# ambígua), mas mantém "PREPARO" depois de "AREA DE PREPARO" só por
+# clareza de leitura.
+CATEGORIAS_NOEL: list[tuple[str, str]] = [
+    ("BALCAO", "Balcão"),
+    ("CAMARA", "Câmara"),
+    ("ILHA", "Ilha"),
+    ("EXPOSITOR", "Expositor"),
+    ("FREEZER", "Freezer"),
+    ("AREA DE PREPARO", "Área de Preparo"),
+    ("PREPARO", "Área de Preparo"),
+    ("RACK", "Rack"),
+    ("SALA DE MAQUINA", "Sala de Máquina"),
+    ("WALK IN COOLER", "Walk-in Cooler"),
+    ("WALKINCOOLER", "Walk-in Cooler"),
+    ("CERVEJEIRA", "Cervejeira"),
+    ("PURIFICADOR", "Purificador de Água"),
+    ("CLIMATICA", "Climática"),
+]
+
 
 @dataclass
 class Atendimento:
+    cliente: str
     categoria: str
     equipamento: str
     arquivo: str
-    tipo: str  # 'preventiva' | 'corretiva' | 'desconhecida'
+    tipo: str  # 'preventiva' | 'corretiva' | 'desconhecida' | 'vencimento_filtro'
     data: datetime | None
     duracao_minutos: float | None
+    loja: str | None = None
     ultima_substituicao_filtro: datetime | None = None
     proxima_substituicao_filtro: datetime | None = None
     periodicidade: str | None = None  # 'semanal' | 'mensal' | 'trimestral' | None
+    vazamento: bool = False
+    gas_kg: float | None = None
 
 
 def conectar_nextcloud() -> Client:
@@ -151,12 +217,67 @@ def extrair_pdfs(itens: list[dict], pasta_raiz: str) -> list[dict]:
     ]
 
 
-def extrair_estrutura(itens: list[dict], pasta_raiz: str) -> dict[str, list[str]]:
-    """Filtra a árvore completa (listar_arvore) pra estrutura Categoria/
-    Equipamento — dá o total de equipamentos "no contrato" por categoria,
-    incluindo os que não tiveram nenhum atendimento ainda este ano."""
+def _sem_acento(s: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+    ).upper()
+
+
+def categorizar_equipamento_noel(nome_pasta: str) -> str:
+    nome_norm = _sem_acento(nome_pasta)
+    for chave, categoria in CATEGORIAS_NOEL:
+        if chave in nome_norm:
+            return categoria
+    return "Outros"
+
+
+def extrair_loja_noel(caminho_rel: str) -> str | None:
+    m = re.search(r"NLJ0*([1-4])", caminho_rel, re.IGNORECASE)
+    if m:
+        return f"Loja {m.group(1)}"
+    m = re.search(r"LOJA\s*0*([1-4])", caminho_rel, re.IGNORECASE)
+    if m:
+        return f"Loja {m.group(1)}"
+    return None
+
+
+def categoria_equipamento_loja(
+    caminho_pdf: str, pasta_raiz: str, cliente: str
+) -> tuple[str, str, str | None]:
+    rel = caminho_pdf.strip("/")
     raiz_norm = pasta_raiz.strip("/")
-    resultado: dict[str, list[str]] = {}
+    if rel.startswith(raiz_norm):
+        rel = rel[len(raiz_norm):].strip("/")
+    partes = rel.split("/")
+
+    if cliente == "Mangels":
+        categoria = partes[0] if len(partes) >= 1 else "Desconhecida"
+        equipamento = partes[-2] if len(partes) >= 2 else "Raiz"
+        return categoria, equipamento, None
+
+    # Noel: não confia em profundidade fixa — pega sempre a pasta pai do
+    # PDF como equipamento, deriva categoria por palavra-chave e loja pelo
+    # prefixo NLJ (ou "LOJA N") em qualquer ponto do caminho.
+    equipamento = partes[-2] if len(partes) >= 2 else "Raiz"
+    categoria = categorizar_equipamento_noel(equipamento)
+    loja = extrair_loja_noel(rel)
+    return categoria, equipamento, loja
+
+
+def extrair_estrutura(itens: list[dict], pasta_raiz: str, cliente: str) -> list[dict]:
+    """Lista de equipamentos "no contrato" (pastas), incluindo os que não
+    tiveram nenhum atendimento ainda — dá o total real e permite calcular
+    pendente = total - realizado. Cada item: {categoria, equipamento, loja}.
+
+    Mangels: só pastas de exatamente 2 níveis (Categoria/Equipamento),
+    igual sempre foi. Noel: qualquer pasta cujo nome bata numa categoria
+    conhecida vira "equipamento" — não depende de profundidade, e pastas
+    organizacionais (ex: a "NOEL LOJA 01" que só embrulha os equipamentos)
+    ficam de fora naturalmente por não baterem em nenhuma palavra-chave.
+    """
+    raiz_norm = pasta_raiz.strip("/")
+    resultado: list[dict] = []
+    vistos: set[tuple[str, str]] = set()
     for item in itens:
         if not item["isdir"]:
             continue
@@ -165,12 +286,24 @@ def extrair_estrutura(itens: list[dict], pasta_raiz: str) -> dict[str, list[str]
             continue
         rel = caminho[len(raiz_norm) + 1:]
         partes = rel.split("/")
-        # só pastas de 2 níveis (Categoria/Equipamento), relativo à raiz —
-        # qualquer outra profundidade não interessa aqui.
-        if len(partes) != 2:
+
+        if cliente == "Mangels":
+            if len(partes) != 2:
+                continue
+            categoria, equipamento = partes
+            loja = None
+        else:
+            equipamento = partes[-1]
+            categoria = categorizar_equipamento_noel(equipamento)
+            if categoria == "Outros":
+                continue
+            loja = extrair_loja_noel(rel)
+
+        chave = (categoria, equipamento)
+        if chave in vistos:
             continue
-        categoria, equipamento = partes
-        resultado.setdefault(categoria, []).append(equipamento)
+        vistos.add(chave)
+        resultado.append({"categoria": categoria, "equipamento": equipamento, "loja": loja})
     return resultado
 
 
@@ -188,8 +321,10 @@ def atendimento_para_dict(a: Atendimento) -> dict:
 
 def dict_para_atendimento(d: dict) -> Atendimento:
     return Atendimento(
+        cliente=d["cliente"],
         categoria=d["categoria"],
         equipamento=d["equipamento"],
+        loja=d.get("loja"),
         arquivo=d["arquivo"],
         tipo=d["tipo"],
         data=datetime.fromisoformat(d["data"]) if d["data"] else None,
@@ -205,6 +340,8 @@ def dict_para_atendimento(d: dict) -> Atendimento:
             else None
         ),
         periodicidade=d.get("periodicidade"),
+        vazamento=d.get("vazamento", False),
+        gas_kg=d.get("gas_kg"),
     )
 
 
@@ -218,17 +355,6 @@ def carregar_cache(caminho: str) -> dict:
 def salvar_cache(cache: dict, caminho: str) -> None:
     with open(caminho, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
-
-
-def categoria_e_equipamento(caminho_pdf: str, pasta_raiz: str) -> tuple[str, str]:
-    rel = caminho_pdf.strip("/")
-    raiz_norm = pasta_raiz.strip("/")
-    if rel.startswith(raiz_norm):
-        rel = rel[len(raiz_norm):].strip("/")
-    partes = rel.split("/")
-    categoria = partes[0] if len(partes) >= 1 else "Desconhecida"
-    equipamento = partes[-2] if len(partes) >= 2 else "Raiz"
-    return categoria, equipamento
 
 
 def classificar_tipo(texto: str, categoria: str) -> str:
@@ -344,8 +470,34 @@ def extrair_datas_filtro(texto: str) -> tuple[datetime | None, datetime | None]:
     return ultima, proxima
 
 
-def processar_pdf(client: Client, caminho_remoto: str, pasta_raiz: str) -> Atendimento:
-    categoria, equipamento = categoria_e_equipamento(caminho_remoto, pasta_raiz)
+def detectar_vazamento(texto: str, tipo: str) -> bool:
+    # Só em corretivas: os checklists de PMOC/preventiva têm "verificar
+    # vazamento" como item de rotina do formulário, então a palavra aparece
+    # ali mesmo sem vazamento nenhum — contar isso inflava a recorrência
+    # com falso positivo (confirmado em 06/08/2026, rodando contra dados
+    # reais do Noel: 4 de 5 relatórios de um equipamento vinham marcados
+    # como vazamento, sendo 4 preventivas de rotina e só 1 vazamento real).
+    if tipo != "corretiva":
+        return False
+    return "vazamento" in texto.lower()
+
+
+def extrair_gas_kg(texto: str) -> float | None:
+    """Tenta achar uma quantidade de gás em kg no texto (Diagnóstico/
+    Solução/Observações). Hoje os relatórios do Noel não têm esse campo
+    estruturado (confirmado com o Rafael em 06/08/2026) — retorna None
+    até o time começar a registrar isso, o que não é um erro."""
+    m = re.search(r"(\d+[.,]?\d*)\s*kg", texto, re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def processar_pdf(client: Client, caminho_remoto: str, pasta_raiz: str, cliente: str) -> Atendimento:
+    categoria, equipamento, loja = categoria_equipamento_loja(caminho_remoto, pasta_raiz, cliente)
     nome_arquivo = caminho_remoto.rstrip("/").split("/")[-1]
     caminho_local = os.path.join(PASTA_TEMP, nome_arquivo)
 
@@ -364,6 +516,8 @@ def processar_pdf(client: Client, caminho_remoto: str, pasta_raiz: str) -> Atend
     duracao = extrair_duracao_corretiva(texto, data) if tipo == "corretiva" else None
     ultima_filtro, proxima_filtro = extrair_datas_filtro(texto)
     periodicidade = extrair_periodicidade(texto) if tipo == "preventiva" else None
+    vazamento = detectar_vazamento(texto, tipo)
+    gas_kg = extrair_gas_kg(texto) if vazamento else None
 
     if tipo == "vencimento_filtro" and data and proxima_filtro and proxima_filtro.date() == data.date():
         # Bug do formulário Produttivo: quando o campo "próxima substituição"
@@ -376,8 +530,10 @@ def processar_pdf(client: Client, caminho_remoto: str, pasta_raiz: str) -> Atend
         proxima_filtro = ultima_filtro + timedelta(days=PERIODICIDADE_FILTRO_DIAS)
 
     return Atendimento(
+        cliente=cliente,
         categoria=categoria,
         equipamento=equipamento,
+        loja=loja,
         arquivo=nome_arquivo,
         tipo=tipo,
         data=data,
@@ -385,12 +541,14 @@ def processar_pdf(client: Client, caminho_remoto: str, pasta_raiz: str) -> Atend
         ultima_substituicao_filtro=ultima_filtro,
         proxima_substituicao_filtro=proxima_filtro,
         periodicidade=periodicidade,
+        vazamento=vazamento,
+        gas_kg=gas_kg,
     )
 
 
-def gerar_relatorio(atendimentos: list[Atendimento], caminho_saida: str) -> None:
+def gerar_relatorio(atendimentos: list[Atendimento], caminho_saida: str, titulo: str) -> None:
     doc = Document()
-    doc.add_heading("KPI de Manutenção — Cliente Contrato PMOC (Refrigeração Aços)", level=0)
+    doc.add_heading(titulo, level=0)
     doc.add_paragraph(f"Gerado em {datetime.now():%d/%m/%Y %H:%M} — Ano de referência: 2026")
 
     validos = [a for a in atendimentos if a.tipo != "desconhecida"]
@@ -459,10 +617,12 @@ def gerar_relatorio(atendimentos: list[Atendimento], caminho_saida: str) -> None
     doc.save(caminho_saida)
 
 
-def enviar_para_supabase(pares: list[tuple[str, Atendimento]]) -> None:
-    """Substitui todo o conteúdo de kpi_manutencao_atendimentos pelo
-    resultado desta execução. Dataset é pequeno (algumas centenas de
-    linhas) — mais simples que fazer upsert incremental linha a linha."""
+def enviar_para_supabase(pares: list[tuple[str, Atendimento]], cliente: str) -> None:
+    """Substitui o conteúdo de kpi_manutencao_atendimentos DESTE CLIENTE
+    pelo resultado desta execução — o DELETE é escopado por `cliente`, não
+    apaga as linhas dos outros clientes. Dataset é pequeno (algumas
+    centenas de linhas) — mais simples que fazer upsert incremental linha
+    a linha."""
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -470,18 +630,22 @@ def enviar_para_supabase(pares: list[tuple[str, Atendimento]]) -> None:
     }
     tabela_url = f"{SUPABASE_URL}/rest/v1/kpi_manutencao_atendimentos"
 
-    resp = requests.delete(f"{tabela_url}?id=not.is.null", headers=headers)
+    resp = requests.delete(f"{tabela_url}?cliente=eq.{cliente}", headers=headers)
     resp.raise_for_status()
 
     registros = [
         {
             "caminho": caminho,
+            "cliente": a.cliente,
             "categoria": a.categoria,
             "equipamento": a.equipamento,
+            "loja": a.loja,
             "arquivo": a.arquivo,
             "tipo": a.tipo,
             "data": a.data.date().isoformat() if a.data else None,
             "duracao_minutos": a.duracao_minutos,
+            "vazamento": a.vazamento,
+            "gas_kg": a.gas_kg,
         }
         for caminho, a in pares
     ]
@@ -495,7 +659,7 @@ def enviar_para_supabase(pares: list[tuple[str, Atendimento]]) -> None:
 
 
 def montar_resumo_equipamentos(
-    estrutura: dict[str, list[str]],
+    estrutura: list[dict],
     pares: list[tuple[str, Atendimento]],
     data_referencia: datetime | None = None,
 ) -> list[dict]:
@@ -509,10 +673,11 @@ def montar_resumo_equipamentos(
     agora = data_referencia or datetime.now()
     por_equip: dict[tuple[str, str], dict] = {}
 
-    def registro_vazio(categoria: str, equipamento: str) -> dict:
+    def registro_vazio(categoria: str, equipamento: str, loja: str | None) -> dict:
         return {
             "categoria": categoria,
             "equipamento": equipamento,
+            "loja": loja,
             "ultima_preventiva": None,
             "periodicidade": None,
             "ultima_substituicao_filtro": None,
@@ -526,16 +691,17 @@ def montar_resumo_equipamentos(
             "_realizado_mes_atual": False,
         }
 
-    for categoria, equipamentos in estrutura.items():
-        for equipamento in equipamentos:
-            por_equip[(categoria, equipamento)] = registro_vazio(categoria, equipamento)
+    for e in estrutura:
+        por_equip[(e["categoria"], e["equipamento"])] = registro_vazio(
+            e["categoria"], e["equipamento"], e["loja"]
+        )
 
     for _, a in pares:
         chave = (a.categoria, a.equipamento)
         if chave not in por_equip:
             # atendimento cuja pasta não apareceu na listagem de estrutura
             # (não deveria acontecer, mas não descartamos o dado por isso)
-            por_equip[chave] = registro_vazio(a.categoria, a.equipamento)
+            por_equip[chave] = registro_vazio(a.categoria, a.equipamento, a.loja)
         info = por_equip[chave]
         if a.tipo == "preventiva" and a.data:
             if info["ultima_preventiva"] is None or a.data > info["ultima_preventiva"]:
@@ -562,7 +728,7 @@ def montar_resumo_equipamentos(
     return list(por_equip.values())
 
 
-def enviar_equipamentos_para_supabase(registros: list[dict]) -> None:
+def enviar_equipamentos_para_supabase(registros: list[dict], cliente: str) -> None:
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -570,13 +736,15 @@ def enviar_equipamentos_para_supabase(registros: list[dict]) -> None:
     }
     tabela_url = f"{SUPABASE_URL}/rest/v1/kpi_manutencao_equipamentos"
 
-    resp = requests.delete(f"{tabela_url}?id=not.is.null", headers=headers)
+    resp = requests.delete(f"{tabela_url}?cliente=eq.{cliente}", headers=headers)
     resp.raise_for_status()
 
     payload = [
         {
+            "cliente": cliente,
             "categoria": r["categoria"],
             "equipamento": r["equipamento"],
+            "loja": r["loja"],
             "em_dia": r["em_dia"],
             "dias_atraso": r["dias_atraso"],
             "periodicidade": r["periodicidade"],
@@ -600,51 +768,25 @@ def enviar_equipamentos_para_supabase(registros: list[dict]) -> None:
         resp.raise_for_status()
 
 
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--mes-referencia",
-        help="Simula outra data pra calcular realizado/pendente do mês "
-        "(formato AAAA-MM-DD). Sem isso, usa a data de hoje de verdade — "
-        "só usar pra pré-visualizar o painel, depois rodar de novo sem a "
-        "flag pra restaurar os dados reais.",
-    )
-    args = parser.parse_args()
-    data_referencia = (
-        datetime.strptime(args.mes_referencia, "%Y-%m-%d") if args.mes_referencia else None
-    )
-    if data_referencia:
-        print(f"⚠ SIMULANDO data de referência: {data_referencia:%d/%m/%Y} (não é a data real)")
-
-    if os.path.exists(PASTA_TEMP):
-        shutil.rmtree(PASTA_TEMP)
-    os.makedirs(PASTA_TEMP, exist_ok=True)
-
-    # Roda em lotes (ex: GitHub Actions com timeout curto): processa no
-    # máximo N arquivos novos/alterados por execução e para — quem já está
-    # em dia com o cache não conta pro limite (é só releitura, instantâneo).
-    # Só publica no Supabase quando a lista INTEIRA foi percorrida nesta
-    # execução; senão a gente arriscaria apagar o banco com dado pela
-    # metade no meio da varredura. Com o cache persistido entre execuções
-    # (ex: actions/cache), a próxima retoma de onde parou.
+def processar_cliente(
+    client: Client,
+    nome_cliente: str,
+    pasta_raiz: str,
+    cache_path: str,
+    data_referencia: datetime | None,
+) -> None:
     max_novos = int(os.environ.get("KPI_MAX_NOVOS_POR_EXECUCAO", "0") or "0")
 
-    client = conectar_nextcloud()
-    cache_anterior = carregar_cache(CACHE_PATH)
+    cache_anterior = carregar_cache(cache_path)
 
-    print(f"Listando '{PASTA_RAIZ}' (uma chamada recursiva só)...")
-    arvore = listar_arvore(client, PASTA_RAIZ)
-    pdfs = extrair_pdfs(arvore, PASTA_RAIZ)
-    estrutura = extrair_estrutura(arvore, PASTA_RAIZ)
-    print(f"{len(pdfs)} PDF(s) encontrado(s).")
+    print(f"Listando '{pasta_raiz}' (uma chamada recursiva só)...")
+    arvore = listar_arvore(client, pasta_raiz)
+    pdfs = extrair_pdfs(arvore, pasta_raiz)
+    estrutura = extrair_estrutura(arvore, pasta_raiz, nome_cliente)
+    print(f"{len(pdfs)} PDF(s) encontrado(s), {len(estrutura)} equipamento(s) na estrutura.")
 
     atendimentos: list[Atendimento] = []
     pares: list[tuple[str, Atendimento]] = []
-    # Começa com o cache antigo inteiro — se a execução parar no meio do
-    # lote, o que não foi visitado ainda continua salvo (não é substituído
-    # por um cache_novo vazio/parcial).
     cache_novo: dict = dict(cache_anterior)
     reaproveitados = 0
     novos_processados = 0
@@ -676,7 +818,7 @@ def main():
 
         print(f"  [{i}/{len(pdfs)}] {nome} (novo/alterado/regra atualizada)")
         try:
-            a = processar_pdf(client, caminho, PASTA_RAIZ)
+            a = processar_pdf(client, caminho, pasta_raiz, nome_cliente)
             atendimentos.append(a)
             pares.append((caminho, a))
             cache_novo[caminho] = {
@@ -688,8 +830,7 @@ def main():
         except Exception as e:
             print(f"    [erro] não processado: {e}")
 
-    salvar_cache(cache_novo, CACHE_PATH)
-    shutil.rmtree(PASTA_TEMP, ignore_errors=True)
+    salvar_cache(cache_novo, cache_path)
 
     print(f"\n{novos_processados} processado(s) agora, {reaproveitados} reaproveitado(s) do cache.")
 
@@ -700,16 +841,67 @@ def main():
         )
         return
 
-    print(f"Gerando relatório: {SAIDA_DOCX}")
-    gerar_relatorio(atendimentos, SAIDA_DOCX)
+    saida_docx = f"kpi_manutencao_{nome_cliente.lower()}_{datetime.now():%Y%m%d}.docx"
+    print(f"Gerando relatório: {saida_docx}")
+    gerar_relatorio(atendimentos, saida_docx, f"KPI de Manutenção — {nome_cliente}")
 
     print("Publicando no Supabase...")
-    enviar_para_supabase(pares)
+    enviar_para_supabase(pares, nome_cliente)
 
     resumo_equipamentos = montar_resumo_equipamentos(estrutura, pares, data_referencia)
-    enviar_equipamentos_para_supabase(resumo_equipamentos)
+    enviar_equipamentos_para_supabase(resumo_equipamentos, nome_cliente)
 
-    print("Concluído.")
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mes-referencia",
+        help="Simula outra data pra calcular realizado/pendente do mês "
+        "(formato AAAA-MM-DD). Sem isso, usa a data de hoje de verdade — "
+        "só usar pra pré-visualizar o painel, depois rodar de novo sem a "
+        "flag pra restaurar os dados reais.",
+    )
+    parser.add_argument(
+        "--cliente",
+        help="Roda só um cliente (ex: Noel) em vez de todos os configurados "
+        "em CLIENTES — útil pra testar isolado sem re-processar tudo.",
+    )
+    args = parser.parse_args()
+    data_referencia = (
+        datetime.strptime(args.mes_referencia, "%Y-%m-%d") if args.mes_referencia else None
+    )
+    if data_referencia:
+        print(f"⚠ SIMULANDO data de referência: {data_referencia:%d/%m/%Y} (não é a data real)")
+
+    clientes_a_rodar = CLIENTES
+    if args.cliente:
+        clientes_a_rodar = [c for c in CLIENTES if c["nome"].lower() == args.cliente.lower()]
+        if not clientes_a_rodar:
+            nomes = ", ".join(c["nome"] for c in CLIENTES)
+            print(f"Cliente '{args.cliente}' não configurado. Opções: {nomes}")
+            return
+
+    if os.path.exists(PASTA_TEMP):
+        shutil.rmtree(PASTA_TEMP)
+    os.makedirs(PASTA_TEMP, exist_ok=True)
+
+    client = conectar_nextcloud()
+
+    for config in clientes_a_rodar:
+        print(f"\n=== {config['nome']} ===")
+        try:
+            processar_cliente(
+                client, config["nome"], config["pasta_raiz"], config["cache_path"], data_referencia
+            )
+        except Exception as e:
+            # Um cliente com problema não pode travar os outros — cada um
+            # publica (ou não) de forma independente.
+            print(f"[erro] Falha ao processar {config['nome']}: {e}")
+
+    shutil.rmtree(PASTA_TEMP, ignore_errors=True)
+    print("\nConcluído.")
 
 
 if __name__ == "__main__":
