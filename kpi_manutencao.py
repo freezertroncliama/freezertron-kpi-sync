@@ -103,7 +103,7 @@ PASTA_TEMP = "temp_pdfs"
 # Bump sempre que classificar_tipo/extrair_data/extrair_duracao_corretiva
 # ou a forma do Atendimento mudar de comportamento — invalida entradas de
 # cache presas na regra antiga.
-CACHE_VERSAO = 8
+CACHE_VERSAO = 9
 # Periodicidade da troca de filtro de bebedouro (fixa, sem template de PMOC
 # próprio) — usada só pra corrigir o bug abaixo, o cálculo real de
 # conforme/vencendo/atrasado é feito no painel (Next.js).
@@ -366,6 +366,12 @@ def classificar_tipo(texto: str, categoria: str) -> str:
     for linha in linhas[:3]:
         low = linha.lower()
         if low.startswith("pmoc"):
+            return "preventiva"
+        # Template próprio do Noel pra visita de rotina não usa "PMOC" no
+        # título — usa "PREVENTIVA ..." (confirmado em 06/08/2026 baixando
+        # um PDF real: "PREVENTIVA SALA DE MÁQUINAS NOEL SUPERMERCADOS...").
+        # Sem essa regra, esses relatórios caíam em "desconhecida".
+        if low.startswith("preventiva"):
             return "preventiva"
         if low.startswith("manutenção corretiva") or low.startswith("manutencao corretiva"):
             return "corretiva"
