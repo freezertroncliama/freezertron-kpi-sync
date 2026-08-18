@@ -375,10 +375,14 @@ def classificar_tipo(texto: str, categoria: str) -> str:
             return "preventiva"
         if low.startswith("manutenção corretiva") or low.startswith("manutencao corretiva"):
             return "corretiva"
-        if low.startswith("check list"):
+        if low.startswith("check list") or low.startswith("checklist"):
             # "Check list de filtros bebedouros" — não é preventiva nem
             # corretiva de equipamento, é o registro de troca/vencimento do
             # filtro do bebedouro. Ver extrair_datas_filtro pras datas.
+            # Produttivo mudou o título padrão em ago/2026: uploads mais
+            # recentes vêm como "Checklist" (uma palavra) ou até
+            # "Checklista" — startswith("checklist") cobre as duas, além
+            # da forma antiga "check list" (com espaço).
             return "vencimento_filtro"
         if low.startswith("ordem de serviço") or low.startswith("ordem de servico"):
             eh_ordem_servico = True
