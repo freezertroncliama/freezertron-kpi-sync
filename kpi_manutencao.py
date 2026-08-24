@@ -170,6 +170,13 @@ def conectar_nextcloud() -> Client:
         "webdav_hostname": f"{NEXTCLOUD_URL}/remote.php/dav/files/{NEXTCLOUD_USER}",
         "webdav_login": NEXTCLOUD_USER,
         "webdav_password": NEXTCLOUD_APP_PASSWORD,
+        # webdavclient3's list() faz um HEAD na pasta antes de listar de
+        # verdade (PROPFIND), só pra conferir se ela existe — esse HEAD é
+        # um caso conhecido de resposta inconsistente nesse Nextcloud
+        # (mesmo bug identificado e corrigido em 24/08/2026 no
+        # conferencia_propostas.py, que também roda neste repo). Pula essa
+        # checagem e vai direto pra listagem real.
+        "disable_check": True,
     }
     return Client(options)
 
@@ -899,6 +906,13 @@ def main():
 
     client = conectar_nextcloud()
 
+    # Sem isso, um cliente falhando (ex: pasta não encontrada) só imprimia
+    # "[erro] Falha ao processar" e o script terminava com exit 0 mesmo
+    # assim — o GitHub Actions marcava a execução como sucesso (verde)
+    # apesar de não ter processado nem publicado nada. Achado em
+    # 24/08/2026 (KPI parado sem avisar, escondido atrás de "Concluído.").
+    houve_falha = False
+
     for config in clientes_a_rodar:
         print(f"\n=== {config['nome']} ===")
         try:
@@ -907,11 +921,16 @@ def main():
             )
         except Exception as e:
             # Um cliente com problema não pode travar os outros — cada um
-            # publica (ou não) de forma independente.
+            # publica (ou não) de forma independente. Mas o script como um
+            # todo precisa terminar com erro pra isso não passar batido.
             print(f"[erro] Falha ao processar {config['nome']}: {e}")
+            houve_falha = True
 
     shutil.rmtree(PASTA_TEMP, ignore_errors=True)
     print("\nConcluído.")
+
+    if houve_falha:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
