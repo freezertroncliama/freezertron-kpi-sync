@@ -67,6 +67,14 @@ def montar_client_webdav() -> Client:
         "webdav_hostname": f"{NEXTCLOUD_URL}/remote.php/dav/files/{NEXTCLOUD_USER}",
         "webdav_login": NEXTCLOUD_USER,
         "webdav_password": NEXTCLOUD_APP_PASSWORD,
+        # webdavclient3's list() faz um HEAD antes pra conferir se a pasta
+        # existe, e só então lista de verdade (PROPFIND). Esse HEAD em
+        # pasta é um caso conhecido de resposta inconsistente em alguns
+        # Nextcloud — foi exatamente isso que quebrou 2x seguidas rodando
+        # no GitHub Actions (RemoteResourceNotFound), mesmo com a pasta
+        # existindo e acessível (confirmado testando local e pelo painel
+        # web). Desativa esse pré-check e vai direto pro PROPFIND real.
+        "disable_check": True,
     }
     return Client(options)
 
