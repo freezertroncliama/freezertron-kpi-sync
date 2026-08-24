@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Conferência diária: pasta de PDFs de propostas (Nextcloud, "ORÇAMENTOS OMIE")
+Conferência diária: pasta de PDFs de propostas (Nextcloud, "ORCAMENTOS OMIE")
 × propostas_geradas (Supabase).
 
 Achado em 22/08/2026 (sessão com o Rafael): dá pra imprimir o preview de uma
@@ -50,7 +50,7 @@ WHATSAPP_ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_DESTINO = os.environ.get("WHATSAPP_DESTINO")  # ex: "5535991240254"
 
-PASTA = "ORÇAMENTOS OMIE"
+PASTA = "ORCAMENTOS OMIE"
 # Só cobra PDF ausente de proposta recente — cobrar propostas antigas geraria
 # ruído de coisa que já foi arquivada/impressa fora desse fluxo, sem
 # relevância prática hoje.
