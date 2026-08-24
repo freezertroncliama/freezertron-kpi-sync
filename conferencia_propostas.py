@@ -27,6 +27,7 @@ Uso:
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -71,7 +72,24 @@ def montar_client_webdav() -> Client:
 
 
 def listar_pdfs(client: Client) -> list[str]:
-    itens = client.list(PASTA, get_info=True)
+    # A listagem dessa pasta específica já falhou 2x seguidas rodando no
+    # GitHub Actions (RemoteResourceNotFound) sem falhar nunca localmente
+    # com as mesmas credenciais — parece engasgo pontual do servidor
+    # Nextcloud (self-hosted), não erro de configuração. Tenta de novo
+    # antes de desistir, em vez de quebrar na primeira falha.
+    ultimo_erro = None
+    for tentativa in range(1, 4):
+        try:
+            itens = client.list(PASTA, get_info=True)
+            break
+        except Exception as err:
+            ultimo_erro = err
+            print(f"Tentativa {tentativa}/3 de listar '{PASTA}' falhou: {err}")
+            if tentativa < 3:
+                time.sleep(10)
+    else:
+        raise ultimo_erro
+
     nomes = []
     for item in itens:
         caminho = item.get("path", "")
