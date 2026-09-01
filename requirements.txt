@@ -1,5 +1,6 @@
 pdfplumber
 requests
 python-docx
+python-pptx
 python-dotenv
 webdavclient3

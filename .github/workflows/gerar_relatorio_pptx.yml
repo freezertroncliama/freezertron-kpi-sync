@@ -1,0 +1,47 @@
+name: Gerar Relatório Mensal PMOC (PPTX)
+
+# Roda no dia 2 de cada mês (dá 1 dia de folga pro kpi_manutencao.py já ter
+# sincronizado os últimos atendimentos do mês anterior) e gera o relatório
+# desse mês anterior — ex: no dia 02/09 gera o relatório de Agosto/2026.
+#
+# Hoje só cobre o cliente Mangels: o molde visual (modelo_relatorio_pmoc.pptx)
+# e as categorias (AR CONDICIONADOS/BEBEDOUROS/CHILLER´S) são específicos
+# dele — a Noel usa outra taxonomia de categoria e não tem relatório PMOC
+# neste formato ainda.
+on:
+  schedule:
+    - cron: "0 10 2 * *"
+  workflow_dispatch:
+    inputs:
+      mes:
+        description: "Mês a gerar (AAAA-MM) — padrão: mês anterior ao atual"
+        required: false
+
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Gerar e subir o relatório
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NEXTCLOUD_URL: ${{ secrets.NEXTCLOUD_URL }}
+          NEXTCLOUD_USER: ${{ secrets.NEXTCLOUD_USER }}
+          NEXTCLOUD_APP_PASSWORD: ${{ secrets.NEXTCLOUD_APP_PASSWORD }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          ARGS="--cliente Mangels --upload"
+          if [ -n "${{ github.event.inputs.mes }}" ]; then
+            ARGS="$ARGS --mes ${{ github.event.inputs.mes }}"
+          fi
+          python -u gerar_relatorio_pptx.py $ARGS

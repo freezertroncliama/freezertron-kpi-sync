@@ -4,3 +4,8 @@ cache_pdfs*.json
 __pycache__/
 *.pyc
 *.docx
+# relatórios .pptx gerados (AAAA-MM.pptx) — não versiona, só sobe pro
+# Supabase Storage / Nextcloud. O modelo_relatorio_pmoc.pptx (molde) fica.
+20[0-9][0-9]-[0-9][0-9].pptx
+saida_*.txt
+png_check/
